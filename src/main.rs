@@ -27,7 +27,6 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use log::{debug, info, warn};
-use log::LevelFilter::Debug;
 use rdkafka::{ClientConfig, ClientContext, Message, TopicPartitionList};
 use rdkafka::consumer::{Consumer, ConsumerContext, Rebalance, StreamConsumer};
 use rdkafka::error::KafkaResult;
@@ -127,10 +126,16 @@ async fn send_kafka_response(producer: &FutureProducer, topic: &str, key: &str, 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(debug_assertions)]
-    SimpleLogger::new().with_level(Debug).init().unwrap();
+    {
+        use log::LevelFilter::{Debug};
+        SimpleLogger::new().with_level(Debug).init().unwrap();
+    }
 
     #[cfg(not(debug_assertions))]
-    SimpleLogger::new().with_level(Info).init().unwrap();
+    {
+        use log::LevelFilter::{Info};
+        SimpleLogger::new().with_level(Info).init().unwrap();
+    }
 
     let context = CustomContext;
 
