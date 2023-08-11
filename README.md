@@ -1,4 +1,4 @@
-# Apache Kafka to bwHC-Backend Bridge
+# Apache Kafka to bwHC-Backend Gateway
 
 Diese Anwendung wartet auf neue Inhalte in einem Apache Kafka Topic und entnimmt enthaltene MTB-Files und leitet diese
 an das bwHC-Backend weiter.
@@ -7,6 +7,16 @@ Der Key wird beibehalten und die Rückantwort vom bwHC-Backend wird in ein konfi
 sodass der ETL-Processor darauf reagieren kann.
 
 Verwendung im Zusammenspiel mit https://github.com/CCC-MF/etl-processor
+
+### Einordnung innerhalb einer DNPM-ETL-Strecke
+
+Diese Anwendung erlaubt das Entgegennehmen von Kafka-Records mit MTB-File-Inhalten und Weiterleiten dieser Inhalte mit einem
+HTTP/REST-Request an die bwHC-Software.
+Antworten von der bwHC-Software werden wiederum als Kafka-Record zurückgesendet.
+
+Sie dient hierbei als Baustein und zum Übersetzen von Nachrichten innerhalb einer gedachten DNPM-ETL-Strecke.
+
+![Modell DNPM-ETL-Strecke](docs/etl.png)
 
 ## Konfiguration
 
