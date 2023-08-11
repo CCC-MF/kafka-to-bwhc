@@ -2,6 +2,7 @@
 name = "kafka-to-bwhc"
 version = "0.1.0"
 edition = "2021"
+license = "AGPL-3.0"
 description = "Sends request to bwHC-Backend, awaits response and sends it back"
 
 [dependencies]
