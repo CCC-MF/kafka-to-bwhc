@@ -18,6 +18,7 @@
  */
 
 use std::str::FromStr;
+
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -63,7 +64,8 @@ enum Status {
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
-    use crate::mtbfile::MTBFileWithConsent;
+
+    use crate::resources::mtbfile::MTBFileWithConsent;
 
     #[test]
     fn should_parse_mtb_file_with_active_consent() {
