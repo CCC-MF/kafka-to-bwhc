@@ -17,16 +17,13 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-mod mtbfile;
-mod bwhc_client;
-
 use std::env;
 use std::error::Error;
 use std::fmt::{Debug as FmtDebug, Display, Formatter};
 use std::str::FromStr;
 use std::time::Duration;
 
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use rdkafka::{ClientConfig, ClientContext, Message, TopicPartitionList};
 use rdkafka::consumer::{Consumer, ConsumerContext, Rebalance, StreamConsumer};
 use rdkafka::error::KafkaResult;
@@ -36,7 +33,10 @@ use simple_logger::SimpleLogger;
 
 use crate::AppError::{ConnectionError, HttpError, MissingConfig};
 use crate::bwhc_client::{BwhcClient, HttpResponse};
-use crate::mtbfile::MTBFileWithConsent;
+use crate::resources::request::Request;
+
+mod bwhc_client;
+mod resources;
 
 struct CustomContext;
 
@@ -84,14 +84,15 @@ impl Display for AppError {
 
 enum KafkaResponsePayload {
     SuccessfulConnection(HttpResponse),
-    NoConnection
+    NoConnection,
 }
 
 impl KafkaResponsePayload {
-    fn to_payload(&self) -> String {
+    fn to_payload(&self, request_id: &str) -> String {
         match self {
             KafkaResponsePayload::SuccessfulConnection(s) => format!(
-                "{{\"status_code\":{}, \"status_body\":{}}}",
+                "{{\"request_id\":\"{}\", \"status_code\":{}, \"status_body\":{}}}",
+                request_id,
                 s.status_code,
                 if s.status_body.trim().is_empty() {
                     String::from("{}")
@@ -100,6 +101,7 @@ impl KafkaResponsePayload {
                 }
             ),
             KafkaResponsePayload::NoConnection => json!({
+                "request_id": request_id,
                 "status_code": 900,
                 "status_body" : {
                     "issues": [{
@@ -107,33 +109,104 @@ impl KafkaResponsePayload {
                         "message": "No HTTP connection"
                     }]
                 }
-            }).to_string()
+            })
+                .to_string(),
         }
     }
 }
 
-async fn send_kafka_response(producer: &FutureProducer, topic: &str, key: &str, payload: KafkaResponsePayload) {
-    if let Err(e) = producer.send(
-        FutureRecord::to(topic)
-            .key(key)
-            .payload(payload.to_payload().as_str()),
-        Duration::from_secs(1),
-    ).await {
+async fn send_kafka_response(
+    producer: &FutureProducer,
+    topic: &str,
+    request_id: &str,
+    key: &str,
+    payload: KafkaResponsePayload,
+) {
+    if let Err(e) = producer
+        .send(
+            FutureRecord::to(topic)
+                .key(key)
+                .payload(payload.to_payload(request_id).as_str()),
+            Duration::from_secs(1),
+        )
+        .await
+    {
         warn!("Response not sent: {}", e.0)
     };
+}
+
+async fn handle_message(
+    producer: &FutureProducer,
+    topic: &str,
+    key: &str,
+    payload: &str,
+) {
+    if Request::can_parse(payload) {
+        if let Ok(request) = Request::from_str(payload) {
+            if request.has_consent() {
+                match BwhcClient::send_mtb_file(request.content_string().as_str()).await {
+                    Ok(response) => {
+                        send_kafka_response(
+                            producer,
+                            topic,
+                            request.request_id().as_str(),
+                            key,
+                            KafkaResponsePayload::SuccessfulConnection(response),
+                        )
+                            .await
+                    }
+                    Err(_) => {
+                        send_kafka_response(
+                            producer,
+                            topic,
+                            request.request_id().as_str(),
+                            key,
+                            KafkaResponsePayload::NoConnection,
+                        )
+                            .await
+                    }
+                }
+            } else {
+                match BwhcClient::send_delete(request.patient_id().as_str()).await {
+                    Ok(response) => {
+                        send_kafka_response(
+                            producer,
+                            topic,
+                            request.request_id().as_str(),
+                            key,
+                            KafkaResponsePayload::SuccessfulConnection(response),
+                        )
+                            .await
+                    }
+                    Err(_) => {
+                        send_kafka_response(
+                            producer,
+                            topic,
+                            request.request_id().as_str(),
+                            key,
+                            KafkaResponsePayload::NoConnection,
+                        )
+                            .await
+                    }
+                }
+            }
+        }
+    } else {
+        error!("Cannot parse message content!")
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(debug_assertions)]
     {
-        use log::LevelFilter::{Debug};
+        use log::LevelFilter::Debug;
         SimpleLogger::new().with_level(Debug).init().unwrap();
     }
 
     #[cfg(not(debug_assertions))]
     {
-        use log::LevelFilter::{Info};
+        use log::LevelFilter::Info;
         SimpleLogger::new().with_level(Info).init().unwrap();
     }
 
@@ -141,12 +214,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match env::var("APP_REST_URI") {
         Ok(_) => { /* OK */ }
-        Err(_) => panic!("Missing configuration 'APP_REST_URI'")
+        Err(_) => panic!("Missing configuration 'APP_REST_URI'"),
     }
 
     let boostrap_servers = env::var("KAFKA_BOOTSTRAP_SERVERS").unwrap_or("kafka:9092".into());
     let src_topic = env::var("APP_KAFKA_TOPIC").unwrap_or("etl-processor".into());
-    let dst_topic = env::var("APP_KAFKA_RESPONSE_TOPIC").unwrap_or(format!("{}_response", src_topic));
+    let dst_topic =
+        env::var("APP_KAFKA_RESPONSE_TOPIC").unwrap_or(format!("{}_response", src_topic));
     let group_id = env::var("APP_KAFKA_GROUP_ID").unwrap_or(format!("{}_group", src_topic));
 
     let consumer: LoggingConsumer = ClientConfig::new()
@@ -171,39 +245,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         match consumer.recv().await {
             Ok(msg) => match msg.payload_view::<str>() {
-                Some(Ok(s)) => {
-                    match msg.key_view::<str>() {
-                        Some(Ok(key)) => {
-                            if let Ok(with_consent) = MTBFileWithConsent::from_str(s) {
-                                if with_consent.has_consent() {
-                                    match BwhcClient::send_mtb_file(s).await {
-                                        Ok(response) => {
-                                            send_kafka_response(producer, dst_topic.as_str(), key, KafkaResponsePayload::SuccessfulConnection(response)).await
-                                        }
-                                        Err(_) => {
-                                            send_kafka_response(producer, dst_topic.as_str(), key, KafkaResponsePayload::NoConnection).await
-                                        }
-                                    }
-                                } else {
-                                    match BwhcClient::send_delete(with_consent.patient_id().as_str()).await {
-                                        Ok(response) => {
-                                            send_kafka_response(producer, dst_topic.as_str(), key, KafkaResponsePayload::SuccessfulConnection(response)).await
-                                        }
-                                        Err(_) => {
-                                            send_kafka_response(producer, dst_topic.as_str(), key, KafkaResponsePayload::NoConnection).await
-                                        }
-                                    }
-                                }
-                            } else {
-                                warn!("Cannot parse MTB File for consent")
-                            }
-                        }
-                        _ => warn!("Unable to use key!")
+                Some(Ok(s)) => match msg.key_view::<str>() {
+                    Some(Ok(key)) => {
+                        handle_message(producer, dst_topic.as_str(), key, s).await
                     }
-                }
-                _ => warn!("Unable to use payload!")
-            }
-            _ => warn!("Unable to consume message"),
+                    _ => error!("Unable to use key!"),
+                },
+                _ => error!("Unable to use payload!"),
+            },
+            _ => error!("Unable to consume message"),
         }
     }
 }
