@@ -93,12 +93,10 @@ impl KafkaResponsePayload {
             KafkaResponsePayload::SuccessfulConnection(s) => json!({
                 "request_id": request_id,
                 "status_code": s.status_code,
-                "status_body" : {
-                    "issues": if s.status_body.trim().is_empty() {
-                        json!({})
-                    } else {
-                        serde_json::from_str::<Value>(&s.status_body).unwrap_or(json!({}))
-                    }
+                "status_body" : if s.status_body.trim().is_empty() {
+                    json!({})
+                } else {
+                    serde_json::from_str::<Value>(&s.status_body).unwrap_or(json!({}))
                 }
             })
             .to_string(),
